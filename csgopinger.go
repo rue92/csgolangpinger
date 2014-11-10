@@ -1,166 +1,149 @@
 package main
 
 import (
-	"os/exec"
 	"fmt"
 	"regexp"
 	"strconv"
+	"os/exec"
+//	"reflect"
+	"runtime"
 	"sync"
-
-	_ "image/png"
-)
-
-import (
-	"github.com/lxn/walk"
-	. "github.com/lxn/walk/declarative"
+	"gopkg.in/qml.v1"
+	"os"
 )
 
 type ServerStatus struct {
 	Name string
-	Addr string
-	Ping int64
+	Address string
+	Ping int
+	Status string
 }
 
-type ServerStatusModel struct {
-	walk.TableModelBase
-	items []*ServerStatus
+var default_items = []ServerStatus{
+	{"Singapore", "103.10.124.1", 0, "Unknown"},
+	{"EU East (Vienna)", "146.66.155.1", 0, "Unknown"},
+	{"EU West (Luxembourg)", "146.66.152.1", 0, "Unknown"},
+	{"US East (Sterling)", "208.78.164.1", 0, "Unknown"},
+	{"US West (Washington)", "192.69.96.1", 0, "Unknown"},
+	{"Australia (Sydney)", "103.10.125.1", 0, "Unknown"},
+	{"Sweden (Stockholm)", "146.66.156.1", 0, "Unknown"},
+	{"South America (Brazil)", "209.197.29.1", 0, "Unknown"},
 }
 
-var default_items = []*ServerStatus{
-	{"Singapore", "103.10.124.1", 0},
-	{"EU East (Vienna)", "146.66.155.1", 0},
-	{"EU West (Luxembourg)", "146.66.152.1", 0},
-	{"US East (Sterling)", "208.78.164.1", 0},
-	{"US West (Washington)", "192.69.96.1", 0},
-	{"Australia (Sydney)", "103.10.125.1", 0},
-	{"Sweden (Stockholm)", "146.66.156.1", 0},
-	{"South America (Brazil)", "209.197.29.1", 0},
-}
-
-var latency_regex = regexp.MustCompile("\\d+ms")
+var linux_latency_regex = regexp.MustCompile("\\d+\\.{0,1}\\d+\\s{0,1}ms")
+var windows_latency_regex = regexp.MustCompile("\\d+ms")
 
 var ping_lock sync.Mutex
 var wg sync.WaitGroup
 
-var status *walk.StatusBarItem
-var mw *walk.MainWindow
-
-func NewServerStatusModel() *ServerStatusModel {
-	m := new(ServerStatusModel)
-	m.items = default_items
-	m.ResetRows()
-	return m
-}
-
-func (m *ServerStatusModel) PingServers() {
+func PingServers() {
 
 	ping_lock.Lock()
 	defer ping_lock.Unlock()
 
-	for i := range m.items {
-		m.items[i].Ping = 0
-		m.PublishRowChanged(i)
+	for i := range default_items {
+		default_items[i].Ping = 0
 		wg.Add(1)
-		go m.pingServer(i)
+		go default_items[i].pingServer()
 	}
+	
 
 	wg.Wait()
 }
 
-func (m *ServerStatusModel) pingServer(i int) {
-	stat := m.items[i]
+func (m *ServerStatus) pingServer() {
 
-	cmd := exec.Command("C:\\Windows\\System32\\ping.exe", "-n", "1", 
-		stat.Addr)
+	defer wg.Done()
+
+	var cmd *exec.Cmd = nil
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("C:\\Windows\\System32\\ping.exe", "-n", 
+			"1", m.Address)
+	} else if runtime.GOOS == "linux" {
+		cmd = exec.Command("/bin/ping", "-c", "1", m.Address)
+	}
 
 	all_bytes, err := cmd.Output()
 	if err != nil {
-		stat.Ping = 0
-		fmt.Println("Could not start ping", i)
+		m.Ping = 0
+		m.Status = "Failed"
+		fmt.Println("Could not start ping", m.Address)
 		return
 	}
 
-	match := latency_regex.Find(all_bytes)
+	var match []byte
+	if runtime.GOOS == "windows" {
+		match = windows_latency_regex.Find(all_bytes)
+	} else if runtime.GOOS == "linux" {
+		match = linux_latency_regex.Find(all_bytes)
+	}
 	if match == nil {
-		stat.Ping = 0
+		m.Ping = 0
+		m.Status = "Failed"
 		fmt.Println("Could not find match")
 		return
 	}
-	lat, err := strconv.ParseInt(string(match[0:len(match)-2]),
-		10, 64)
-	stat.Ping = lat
 
+	lat, err := strconv.ParseFloat(string(match[0:len(match)-3]),
+		32)
 	if err != nil {
-		stat.Ping = 0
+		m.Ping = 0
+		m.Status = "Failed"
 		fmt.Println("Failed to parse latency")
 		return
 	}
-
-	wg.Done()
-	m.PublishRowChanged(i)
-}
-
-func (m *ServerStatusModel) RowCount() int {
-	return len(m.items)
-}
-
-func (m *ServerStatusModel) Value(row, col int) interface{} {
-	item := m.items[row]
-
-	switch col {
-	case 0:
-		return item.Name
-
-	case 1:
-		return item.Ping
-	}
-
-	panic("Unexpected column")
-}
-
-func (m *ServerStatusModel) Len() int {
-	return len(m.items)
-}
-
-func (m *ServerStatusModel) ResetRows() {
-	for i := range m.items {
-		m.items[i].Ping = 0
-	}
-
-	m.PublishRowsReset()
+	m.Ping = int(lat)
+	m.Status = "Success"
 }
 
 func main() {
-	
-	walk.SetPanicOnError(true)
-	model := NewServerStatusModel()
-	
-	MainWindow{
-		AssignTo: &mw,
-		Title: "CS:GO Matchmaking Pings",
-		Size: Size{213, 260},
-		Layout: VBox{},
-		Children: []Widget{
-			TableView{
-				AlternatingRowBGColor: walk.RGB(255, 255, 224),
-				Columns: []TableViewColumn{
-					{Title: "Server", Format: "%s",
-						Width: 125},
-					{Title: "Latency", Format: "%d",
-						Alignment: AlignFar,
-						Width: 50},
-				},
-				Model: model,
-			},
-			PushButton{
-				Text: "Ping Servers",
-				OnClicked: model.PingServers,
-			},
-		},
+	if err := qml.Run(run); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
-	sb := mw.StatusBar()
-	status := walk.NewStatusBarItem()
-	status.SetText("Latency Check: ")
-	sb.Items().Add(status)
-	mw.Run()
+}
+
+func run() error {
+
+	engine := qml.NewEngine()
+	servers := &ServerModel{
+		list: default_items,
+		Len: len(default_items),
+	}
+	engine.Context().SetVar("servers", servers)
+	engine.Context().SetVar("ctrl", &Control{})
+
+	controls, err := engine.LoadFile("main.qml")
+	if err != nil {
+		return err
+	}
+
+	window := controls.CreateWindow(nil)
+
+	window.Show()
+	window.Wait()
+	return nil
+}
+
+type Control struct {
+}
+
+type ServerModel struct {
+	list []ServerStatus
+	Len int
+}
+
+func (ctrl *Control) Ping() {
+	PingServers()
+}
+
+func (model *ServerModel) Sync() {
+	for i := range default_items {
+		qml.Changed(&model.list[i], &model.list[i].Ping)
+		qml.Changed(&model.list[i], &model.list[i].Status)
+	}
+}
+
+func (model *ServerModel) Server(index int) *ServerStatus {
+	return &model.list[index]
 }
